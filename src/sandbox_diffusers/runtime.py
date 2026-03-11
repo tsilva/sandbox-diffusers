@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,16 @@ class RuntimeConfig:
 
 def configure_environment() -> None:
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    warnings.filterwarnings(
+        "ignore",
+        message="CUDA is not available or torch_xla is imported. Disabling autocast.",
+        module=r"diffusers\.models\.transformers\.transformer_kandinsky",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`torch_dtype` is deprecated! Use `dtype` instead!",
+        module=r"diffusers\..*",
+    )
 
 
 def resolve_device(requested_device: str, torch_module) -> str:
@@ -81,6 +92,15 @@ def pipeline_load_kwargs(dtype, device: str, disable_safety_checker: bool, torch
         kwargs["safety_checker"] = None
         kwargs["requires_safety_checker"] = False
     return kwargs
+
+
+def optimize_pipeline(pipe, device: str):
+    pipe.enable_attention_slicing()
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+        pipe.vae.enable_slicing()
+    if device == "mps" and hasattr(pipe, "set_progress_bar_config"):
+        pipe.set_progress_bar_config(disable=True)
+    return pipe
 
 
 def apply_scheduler(pipe, scheduler_name: str):
@@ -129,6 +149,13 @@ def warmup_img2img_if_needed(pipe, config: RuntimeConfig, source_image: Image.Im
         num_inference_steps=2,
         guidance_scale=config.guidance_scale,
     )
+
+
+def finalize_inference(device: str, torch_module) -> None:
+    if device != "mps":
+        return
+    torch_module.mps.synchronize()
+    torch_module.mps.empty_cache()
 
 
 def open_image(image_path: str) -> Image.Image:

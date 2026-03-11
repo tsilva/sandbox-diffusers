@@ -13,9 +13,11 @@ from sandbox_diffusers.runtime import (
     RuntimeConfig,
     apply_scheduler,
     configure_environment,
+    finalize_inference,
     make_contact_sheet,
     make_output_path,
     open_image,
+    optimize_pipeline,
     pipeline_load_kwargs,
     resize_for_generation,
     resolve_device,
@@ -117,7 +119,7 @@ def _load_pipeline(
         **pipeline_load_kwargs(dtype, device, disable_safety_checker, torch),
     )
     pipe = pipe.to(device)
-    pipe.enable_attention_slicing()
+    pipe = optimize_pipeline(pipe, device)
     pipe = apply_scheduler(pipe, scheduler)
     PIPELINE_CACHE[key] = pipe
     return pipe
@@ -159,16 +161,18 @@ def _txt2img(
         )
         seed_everything(seed, device, torch)
         warmup_txt2img_if_needed(pipe, config)
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            width=width,
-            height=height,
-        )
+        with torch.inference_mode():
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                width=width,
+                height=height,
+            )
 
     image = result.images[0]
+    finalize_inference(device, torch)
     output_path = make_output_path(None, "ui-txt2img.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -225,16 +229,18 @@ def _img2img(
         )
         seed_everything(seed, device, torch)
         warmup_img2img_if_needed(pipe, config, source)
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=source,
-            strength=strength,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-        )
+        with torch.inference_mode():
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                image=source,
+                strength=strength,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+            )
 
     image = result.images[0]
+    finalize_inference(device, torch)
     output_path = make_output_path(None, "ui-img2img.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -307,17 +313,19 @@ def _compare(
                 "txt2img", DEFAULT_MODEL, device, dtype, scheduler, disable_safety_checker
             )
             seed_everything(seed, device, torch)
-            result = pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                width=width,
-                height=height,
-            )
+            with torch.inference_mode():
+                result = pipe(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    width=width,
+                    height=height,
+                )
             rendered.append((label, result.images[0]))
 
     sheet = make_contact_sheet(rendered)
+    finalize_inference(device, torch)
     output_path = make_output_path(None, "ui-compare.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path)

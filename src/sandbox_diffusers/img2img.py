@@ -9,8 +9,10 @@ from sandbox_diffusers.runtime import (
     RuntimeConfig,
     apply_scheduler,
     configure_environment,
+    finalize_inference,
     make_output_path,
     open_image,
+    optimize_pipeline,
     pipeline_load_kwargs,
     resize_for_generation,
     resolve_device,
@@ -99,21 +101,23 @@ def main() -> None:
         **pipeline_load_kwargs(dtype, device, args.disable_safety_checker, torch),
     )
     pipe = pipe.to(device)
-    pipe.enable_attention_slicing()
+    pipe = optimize_pipeline(pipe, device)
     pipe = apply_scheduler(pipe, args.scheduler)
 
     source = resize_for_generation(open_image(args.input_image), args.width, args.height)
     seed_everything(args.seed, device, torch)
     warmup_img2img_if_needed(pipe, config, source)
-    result = pipe(
-        prompt=args.prompt,
-        negative_prompt=args.negative_prompt,
-        image=source,
-        strength=args.strength,
-        num_inference_steps=args.steps,
-        guidance_scale=args.guidance_scale,
-    )
+    with torch.inference_mode():
+        result = pipe(
+            prompt=args.prompt,
+            negative_prompt=args.negative_prompt,
+            image=source,
+            strength=args.strength,
+            num_inference_steps=args.steps,
+            guidance_scale=args.guidance_scale,
+        )
     image = result.images[0]
+    finalize_inference(device, torch)
 
     output_path = make_output_path(args.output, "img2img.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)

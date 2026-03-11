@@ -9,8 +9,10 @@ from sandbox_diffusers.runtime import (
     RuntimeConfig,
     apply_scheduler,
     configure_environment,
+    finalize_inference,
     make_contact_sheet,
     make_output_path,
+    optimize_pipeline,
     pipeline_load_kwargs,
     resolve_device,
     resolve_dtype,
@@ -120,7 +122,7 @@ def main() -> None:
         **pipeline_load_kwargs(dtype, device, args.disable_safety_checker, torch),
     )
     base_pipe = base_pipe.to(device)
-    base_pipe.enable_attention_slicing()
+    base_pipe = optimize_pipeline(base_pipe, device)
 
     seed_everything(42, device, torch)
     warmup_txt2img_if_needed(base_pipe, config)
@@ -129,18 +131,20 @@ def main() -> None:
     for label, prompt, seed, scheduler in build_runs(args):
         pipe = apply_scheduler(base_pipe, scheduler)
         seed_everything(seed, device, torch)
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=args.negative_prompt,
-            num_inference_steps=args.steps,
-            guidance_scale=args.guidance_scale,
-            width=args.width,
-            height=args.height,
-        )
+        with torch.inference_mode():
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=args.negative_prompt,
+                num_inference_steps=args.steps,
+                guidance_scale=args.guidance_scale,
+                width=args.width,
+                height=args.height,
+            )
         images.append((label, result.images[0]))
         print(f"Rendered {label}")
 
     sheet = make_contact_sheet(images)
+    finalize_inference(device, torch)
     output_path = make_output_path(args.output, "compare.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path)

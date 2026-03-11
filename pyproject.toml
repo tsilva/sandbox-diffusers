@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
   "accelerate>=1.10.0",
   "diffusers[torch]==0.36.0",
+  "gradio>=5,<6",
   "huggingface-hub>=0.34.0,<1.0",
   "Pillow>=10.4.0",
   "safetensors>=0.6.2",
@@ -21,6 +22,7 @@ dependencies = [
 sandbox-diffusers-generate = "sandbox_diffusers.generate:main"
 sandbox-diffusers-img2img = "sandbox_diffusers.img2img:main"
 sandbox-diffusers-compare = "sandbox_diffusers.compare:main"
+sandbox-diffusers-ui = "sandbox_diffusers.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

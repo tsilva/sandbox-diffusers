@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 src/sandbox_diffusers/__init__.py
+src/sandbox_diffusers/app.py
 src/sandbox_diffusers/compare.py
 src/sandbox_diffusers/generate.py
 src/sandbox_diffusers/img2img.py

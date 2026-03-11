@@ -6,6 +6,7 @@ Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: accelerate>=1.10.0
 Requires-Dist: diffusers[torch]==0.36.0
+Requires-Dist: gradio<6,>=5
 Requires-Dist: huggingface-hub<1.0,>=0.34.0
 Requires-Dist: Pillow>=10.4.0
 Requires-Dist: safetensors>=0.6.2
@@ -70,6 +71,27 @@ If the goal is learning, use the repo in this order:
 4. Move to image-to-image once you want controlled edits instead of fresh generations.
 
 The CLIs below are set up for exactly that.
+
+## Gradio UI
+
+Launch the local UI:
+
+```bash
+source .venv/bin/activate
+sandbox-diffusers-ui
+```
+
+Or choose a host and port explicitly:
+
+```bash
+sandbox-diffusers-ui --host 127.0.0.1 --port 7860
+```
+
+The UI includes three tabs:
+
+- text-to-image for prompt, seed, and scheduler experiments
+- image-to-image for controlled edits from an uploaded source image
+- compare for side-by-side prompt, seed, or scheduler contact sheets
 
 ## Text to image
 

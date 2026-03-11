@@ -58,6 +58,27 @@ If the goal is learning, use the repo in this order:
 
 The CLIs below are set up for exactly that.
 
+## Gradio UI
+
+Launch the local UI:
+
+```bash
+source .venv/bin/activate
+sandbox-diffusers-ui
+```
+
+Or choose a host and port explicitly:
+
+```bash
+sandbox-diffusers-ui --host 127.0.0.1 --port 7860
+```
+
+The UI includes three tabs:
+
+- text-to-image for prompt, seed, and scheduler experiments
+- image-to-image for controlled edits from an uploaded source image
+- compare for side-by-side prompt, seed, or scheduler contact sheets
+
 ## Text to image
 
 ```bash

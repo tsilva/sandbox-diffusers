@@ -2,3 +2,4 @@
 sandbox-diffusers-compare = sandbox_diffusers.compare:main
 sandbox-diffusers-generate = sandbox_diffusers.generate:main
 sandbox-diffusers-img2img = sandbox_diffusers.img2img:main
+sandbox-diffusers-ui = sandbox_diffusers.app:main

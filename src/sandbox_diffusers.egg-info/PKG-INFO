@@ -5,23 +5,26 @@ Summary: Minimal Apple Silicon-friendly Diffusers sandbox.
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: accelerate>=1.10.0
-Requires-Dist: diffusers[torch]==0.36.0
-Requires-Dist: gradio<6,>=5
-Requires-Dist: huggingface-hub<1.0,>=0.34.0
-Requires-Dist: Pillow>=10.4.0
+Requires-Dist: diffusers[torch]==0.38.0
+Requires-Dist: huggingface-hub<2,>=1
+Requires-Dist: Pillow>=12.3.0
 Requires-Dist: safetensors>=0.6.2
-Requires-Dist: transformers<5,>=4.55.0
+Requires-Dist: starlette<2,>=1.3.1
+Requires-Dist: transformers<6,>=5.5.0
+Requires-Dist: uvicorn<1,>=0.41.0
 
 # sandbox-diffusers
 
 Minimal project scaffold for running the latest stable `diffusers` release on Apple Silicon.
 
-As of March 11, 2026, this project pins `diffusers==0.36.0`, which is the current stable PyPI release:
+As of August 14, 2026, this project pins `diffusers==0.38.0`. This release closes the
+remote-code trust bypasses fixed in 0.38.0, and the application explicitly keeps
+`trust_remote_code=False` for all model loads:
 
 - PyPI: <https://pypi.org/project/diffusers/>
 - Install docs: <https://huggingface.co/docs/diffusers/installation>
 - Apple Silicon / MPS docs: <https://huggingface.co/docs/diffusers/en/optimization/mps>
-- Diffusers pipeline loading / safety checker docs: <https://huggingface.co/docs/diffusers/v0.36.0/using-diffusers/loading>
+- Diffusers pipeline loading / safety checker docs: <https://huggingface.co/docs/diffusers/v0.38.0/using-diffusers/loading>
 - PyTorch MPS docs: <https://docs.pytorch.org/docs/stable/mps.html>
 - Apple Metal + PyTorch page: <https://developer.apple.com/metal/pytorch/>
 
@@ -42,17 +45,20 @@ On this machine, the combination that actually worked was:
 - attention slicing to reduce memory pressure
 - a one-step warmup pass before the real generation call
 
-The dependency set also pins `transformers<5`. `diffusers==0.36.0` installs with `transformers 5.x` unless you constrain it, and that breaks pipeline imports today.
+The dependency set requires a patched Transformers 5.x release and verifies the
+Diffusers pipeline imports against that runtime.
+
+Custom pipelines and components from a model repository can execute Python code.
+This sandbox rejects them by default. Do not enable `trust_remote_code` unless you
+have pinned a revision and reviewed every executable file in that revision.
 
 ## Setup
 
 Use an arm64 Python build on macOS. Apple Silicon acceleration will not work correctly from an x86_64 / Rosetta Python interpreter.
 
 ```bash
-python3 -m venv .venv
+uv sync --config-file uv.toml --frozen --all-groups
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
 ```
 
 Optional but useful on MPS if an op falls back unexpectedly:
@@ -72,9 +78,9 @@ If the goal is learning, use the repo in this order:
 
 The CLIs below are set up for exactly that.
 
-## Gradio UI
+## Local web UI
 
-Launch the local UI:
+Launch the dependency-light Starlette UI:
 
 ```bash
 source .venv/bin/activate
@@ -87,6 +93,8 @@ Or choose a host and port explicitly:
 sandbox-diffusers-ui --host 127.0.0.1 --port 7860
 ```
 
+The server binds to `127.0.0.1` by default, sends restrictive browser security
+headers, limits request/image sizes, and does not expose a public share-link mode.
 The UI includes three tabs:
 
 - text-to-image for prompt, seed, and scheduler experiments

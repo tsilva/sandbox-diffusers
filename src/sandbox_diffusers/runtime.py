@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -70,7 +70,7 @@ def resolve_dtype(device: str, requested_precision: str, torch_module):
 def make_output_path(output: str | None, stem: str) -> Path:
     if output:
         return Path(output).expanduser().resolve()
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return (Path.cwd() / "output" / f"{timestamp}-{stem}").resolve()
 
 

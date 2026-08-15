@@ -2,14 +2,11 @@ name: Dependency review
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   push:
-    branches:
-      - main
+    branches: [main]
   merge_group:
-    types:
-      - checks_requested
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -21,7 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        with:
+          persist-credentials: false
       - name: Dependency review (pull request)
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -29,7 +27,6 @@ jobs:
           fail-on-severity: high
           fail-on-scopes: runtime, development, unknown
           retry-on-snapshot-warnings: true
-
       - name: Dependency review (push audit)
         if: ${{ github.event_name == 'push' }}
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -39,7 +36,6 @@ jobs:
           retry-on-snapshot-warnings: true
           base-ref: ${{ github.event.before }}
           head-ref: ${{ github.sha }}
-
       - name: Dependency review (merge group)
         if: ${{ github.event_name == 'merge_group' }}
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0

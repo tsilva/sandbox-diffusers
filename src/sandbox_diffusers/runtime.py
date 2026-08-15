@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw
-
 
 DEFAULT_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 DEFAULT_PROMPT = (
@@ -71,7 +70,7 @@ def resolve_dtype(device: str, requested_precision: str, torch_module):
 def make_output_path(output: str | None, stem: str) -> Path:
     if output:
         return Path(output).expanduser().resolve()
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return (Path.cwd() / "output" / f"{timestamp}-{stem}").resolve()
 
 
@@ -84,6 +83,9 @@ def seed_everything(seed: int, device: str, torch_module) -> None:
 def pipeline_load_kwargs(dtype, device: str, disable_safety_checker: bool, torch_module) -> dict:
     kwargs = {
         "torch_dtype": dtype,
+        # Custom Hub code is executable. Keep the trust boundary explicit at every
+        # pipeline load instead of relying on Diffusers' default value.
+        "trust_remote_code": False,
         "use_safetensors": True,
     }
     if device == "mps" and dtype == torch_module.float16:

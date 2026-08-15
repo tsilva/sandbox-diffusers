@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import threading
-from pathlib import Path
+from io import BytesIO
 
-import gradio as gr
+from PIL import Image
+from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse
+from starlette.routing import Route
 
 from sandbox_diffusers.runtime import (
     DEFAULT_MODEL,
@@ -16,7 +23,6 @@ from sandbox_diffusers.runtime import (
     finalize_inference,
     make_contact_sheet,
     make_output_path,
-    open_image,
     optimize_pipeline,
     pipeline_load_kwargs,
     resize_for_generation,
@@ -27,60 +33,13 @@ from sandbox_diffusers.runtime import (
     warmup_txt2img_if_needed,
 )
 
-
 PIPELINE_CACHE: dict[tuple[str, str, str, str, str, bool], object] = {}
 PIPELINE_LOCK = threading.Lock()
-
-
-APP_CSS = """
-:root {
-  --sand-bg: #f3efe4;
-  --sand-panel: #f8f4ea;
-  --sand-ink: #1f1b18;
-  --sand-accent: #b54f28;
-  --sand-accent-2: #235f72;
-  --sand-line: #d5cab8;
-}
-
-.gradio-container {
-  background:
-    radial-gradient(circle at top right, rgba(181, 79, 40, 0.16), transparent 26%),
-    radial-gradient(circle at bottom left, rgba(35, 95, 114, 0.14), transparent 30%),
-    linear-gradient(180deg, #f7f1e4 0%, var(--sand-bg) 100%);
-}
-
-.app-shell {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.hero {
-  background: linear-gradient(135deg, rgba(255,255,255,0.72), rgba(255,255,255,0.42));
-  border: 1px solid rgba(31, 27, 24, 0.08);
-  border-radius: 24px;
-  padding: 24px 28px;
-  box-shadow: 0 10px 30px rgba(31, 27, 24, 0.08);
-  backdrop-filter: blur(6px);
-}
-
-.hero h1 {
-  margin: 0;
-  font-size: 2.2rem;
-  line-height: 1;
-}
-
-.hero p {
-  margin: 10px 0 0;
-  max-width: 760px;
-}
-
-.panel-note {
-  border-left: 4px solid var(--sand-accent);
-  padding: 10px 14px;
-  background: rgba(181, 79, 40, 0.08);
-  border-radius: 10px;
-}
-"""
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_PIXELS = 16_777_216
+SCHEDULERS = {"default", "ddim", "dpm", "euler", "lms"}
+DEVICES = {"auto", "mps", "cpu"}
+PRECISIONS = {"auto", "float32", "float16"}
 
 
 def _dtype_label(dtype) -> str:
@@ -125,109 +84,84 @@ def _load_pipeline(
     return pipe
 
 
-def _txt2img(
-    prompt: str,
-    negative_prompt: str,
-    steps: int,
-    guidance_scale: float,
-    seed: int,
-    width: int,
-    height: int,
-    scheduler: str,
-    precision: str,
-    device_choice: str,
-    disable_safety_checker: bool,
-):
+def _runtime(payload: dict, *, default_steps: int = 12) -> tuple[object, RuntimeConfig]:
     configure_environment()
     import torch
 
-    device = resolve_device(device_choice, torch)
+    device = resolve_device(_choice(payload, "device", "auto", DEVICES), torch)
+    precision = _choice(payload, "precision", "auto", PRECISIONS)
     dtype = resolve_dtype(device, precision, torch)
     config = RuntimeConfig(
         model=DEFAULT_MODEL,
         device=device,
         dtype=dtype,
-        steps=steps,
-        guidance_scale=guidance_scale,
-        width=width,
-        height=height,
-        scheduler=scheduler,
-        disable_safety_checker=disable_safety_checker,
+        steps=_bounded_int(payload, "steps", default_steps, 1, 30),
+        guidance_scale=_bounded_float(payload, "guidance_scale", 7.5, 0, 15),
+        width=_bounded_int(payload, "width", 512, 256, 640),
+        height=_bounded_int(payload, "height", 512, 256, 640),
+        scheduler=_choice(payload, "scheduler", "default", SCHEDULERS),
+        disable_safety_checker=bool(payload.get("disable_safety_checker", False)),
     )
+    return torch, config
+
+
+def _txt2img(payload: dict) -> tuple[Image.Image, str]:
+    torch, config = _runtime(payload)
+    prompt = _text(payload, "prompt", DEFAULT_PROMPT, 2_000)
+    negative_prompt = _text(payload, "negative_prompt", DEFAULT_NEGATIVE_PROMPT, 2_000)
+    seed = _bounded_int(payload, "seed", 42, 0, 2**32 - 1)
 
     with PIPELINE_LOCK:
         pipe = _load_pipeline(
-            "txt2img", DEFAULT_MODEL, device, dtype, scheduler, disable_safety_checker
+            "txt2img",
+            config.model,
+            config.device,
+            config.dtype,
+            config.scheduler,
+            config.disable_safety_checker,
         )
-        seed_everything(seed, device, torch)
+        seed_everything(seed, config.device, torch)
         warmup_txt2img_if_needed(pipe, config)
         with torch.inference_mode():
             result = pipe(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                width=width,
-                height=height,
+                num_inference_steps=config.steps,
+                guidance_scale=config.guidance_scale,
+                width=config.width,
+                height=config.height,
             )
 
     image = result.images[0]
-    finalize_inference(device, torch)
-    output_path = make_output_path(None, "ui-txt2img.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path)
-    summary = (
-        f"Saved to `{output_path}`\n\n"
-        f"Model: `{DEFAULT_MODEL}`\n"
-        f"Device: `{device}`\n"
-        f"Precision: `{_dtype_label(dtype)}`\n"
-        f"Scheduler: `{scheduler}`\n"
-        f"Seed: `{seed}`"
+    finalize_inference(config.device, torch)
+    return _save_result(image, "ui-txt2img.png", config, f"Seed: {seed}")
+
+
+def _img2img(payload: dict) -> tuple[Image.Image, str]:
+    torch, config = _runtime(payload, default_steps=18)
+    source = resize_for_generation(
+        _decode_image(payload.get("source_image")), config.width, config.height
     )
-    return image, summary
-
-
-def _img2img(
-    source_image,
-    prompt: str,
-    negative_prompt: str,
-    strength: float,
-    steps: int,
-    guidance_scale: float,
-    seed: int,
-    width: int,
-    height: int,
-    scheduler: str,
-    precision: str,
-    device_choice: str,
-    disable_safety_checker: bool,
-):
-    if source_image is None:
-        raise gr.Error("Upload a source image first.")
-
-    configure_environment()
-    import torch
-
-    device = resolve_device(device_choice, torch)
-    dtype = resolve_dtype(device, precision, torch)
-    config = RuntimeConfig(
-        model=DEFAULT_MODEL,
-        device=device,
-        dtype=dtype,
-        steps=steps,
-        guidance_scale=guidance_scale,
-        width=width,
-        height=height,
-        scheduler=scheduler,
-        disable_safety_checker=disable_safety_checker,
+    prompt = _text(
+        payload,
+        "prompt",
+        "watercolor painting of the same lighthouse scene, soft brush strokes",
+        2_000,
     )
-    source = resize_for_generation(source_image.convert("RGB"), width, height)
+    negative_prompt = _text(payload, "negative_prompt", DEFAULT_NEGATIVE_PROMPT, 2_000)
+    seed = _bounded_int(payload, "seed", 42, 0, 2**32 - 1)
+    strength = _bounded_float(payload, "strength", 0.45, 0.1, 0.9)
 
     with PIPELINE_LOCK:
         pipe = _load_pipeline(
-            "img2img", DEFAULT_MODEL, device, dtype, scheduler, disable_safety_checker
+            "img2img",
+            config.model,
+            config.device,
+            config.dtype,
+            config.scheduler,
+            config.disable_safety_checker,
         )
-        seed_everything(seed, device, torch)
+        seed_everything(seed, config.device, torch)
         warmup_img2img_if_needed(pipe, config, source)
         with torch.inference_mode():
             result = pipe(
@@ -235,382 +169,244 @@ def _img2img(
                 negative_prompt=negative_prompt,
                 image=source,
                 strength=strength,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
+                num_inference_steps=config.steps,
+                guidance_scale=config.guidance_scale,
             )
 
     image = result.images[0]
-    finalize_inference(device, torch)
-    output_path = make_output_path(None, "ui-img2img.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path)
-    summary = (
-        f"Saved to `{output_path}`\n\n"
-        f"Strength: `{strength}`\n"
-        f"Device: `{device}`\n"
-        f"Precision: `{_dtype_label(dtype)}`\n"
-        f"Scheduler: `{scheduler}`\n"
-        f"Seed: `{seed}`"
-    )
-    return image, summary
+    finalize_inference(config.device, torch)
+    return _save_result(image, "ui-img2img.png", config, f"Strength: {strength}")
 
 
-def _compare(
-    prompts_text: str,
-    seeds_text: str,
-    schedulers: list[str],
-    negative_prompt: str,
-    steps: int,
-    guidance_scale: float,
-    width: int,
-    height: int,
-    precision: str,
-    device_choice: str,
-    disable_safety_checker: bool,
-):
-    configure_environment()
-    import torch
-
-    prompts = [line.strip() for line in prompts_text.splitlines() if line.strip()]
-    if not prompts:
-        prompts = [DEFAULT_PROMPT]
-
-    seeds = [int(item.strip()) for item in seeds_text.split(",") if item.strip()]
-    if not seeds:
-        seeds = [42, 123]
-
-    scheduler_list = schedulers or ["default"]
-
-    device = resolve_device(device_choice, torch)
-    dtype = resolve_dtype(device, precision, torch)
-    config = RuntimeConfig(
-        model=DEFAULT_MODEL,
-        device=device,
-        dtype=dtype,
-        steps=steps,
-        guidance_scale=guidance_scale,
-        width=width,
-        height=height,
-        scheduler="default",
-        disable_safety_checker=disable_safety_checker,
-    )
+def _compare(payload: dict) -> tuple[Image.Image, str]:
+    torch, config = _runtime(payload)
+    prompts = [line.strip() for line in str(payload.get("prompts", "")).splitlines() if line.strip()]
+    prompts = prompts[:6] or [DEFAULT_PROMPT]
+    seeds = _integer_list(payload.get("seeds", "42,123"), maximum=6)
+    schedulers = [item for item in payload.get("schedulers", ["default"]) if item in SCHEDULERS]
+    schedulers = schedulers[:6] or ["default"]
+    negative_prompt = _text(payload, "negative_prompt", DEFAULT_NEGATIVE_PROMPT, 2_000)
 
     if len(prompts) > 1:
-        runs = [(f"prompt {idx + 1}", prompt, seeds[0], scheduler_list[0]) for idx, prompt in enumerate(prompts)]
+        runs = [(f"prompt {index + 1}", prompt, seeds[0], schedulers[0]) for index, prompt in enumerate(prompts)]
     elif len(seeds) > 1:
-        runs = [(f"seed {seed}", prompts[0], seed, scheduler_list[0]) for seed in seeds]
+        runs = [(f"seed {seed}", prompts[0], seed, schedulers[0]) for seed in seeds]
     else:
-        runs = [(f"scheduler {scheduler}", prompts[0], seeds[0], scheduler) for scheduler in scheduler_list]
+        runs = [(f"scheduler {scheduler}", prompts[0], seeds[0], scheduler) for scheduler in schedulers]
 
-    rendered = []
+    rendered: list[tuple[str, Image.Image]] = []
     with PIPELINE_LOCK:
         base_pipe = _load_pipeline(
-            "txt2img", DEFAULT_MODEL, device, dtype, "default", disable_safety_checker
+            "txt2img", config.model, config.device, config.dtype, "default", config.disable_safety_checker
         )
         warmup_txt2img_if_needed(base_pipe, config)
         for label, prompt, seed, scheduler in runs:
             pipe = _load_pipeline(
-                "txt2img", DEFAULT_MODEL, device, dtype, scheduler, disable_safety_checker
+                "txt2img", config.model, config.device, config.dtype, scheduler, config.disable_safety_checker
             )
-            seed_everything(seed, device, torch)
+            seed_everything(seed, config.device, torch)
             with torch.inference_mode():
                 result = pipe(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    width=width,
-                    height=height,
+                    num_inference_steps=config.steps,
+                    guidance_scale=config.guidance_scale,
+                    width=config.width,
+                    height=config.height,
                 )
             rendered.append((label, result.images[0]))
 
     sheet = make_contact_sheet(rendered)
-    finalize_inference(device, torch)
-    output_path = make_output_path(None, "ui-compare.png")
+    finalize_inference(config.device, torch)
+    return _save_result(sheet, "ui-compare.png", config, f"Panels: {len(rendered)}")
+
+
+def _save_result(
+    image: Image.Image, filename: str, config: RuntimeConfig, detail: str
+) -> tuple[Image.Image, str]:
+    output_path = make_output_path(None, filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(output_path)
+    image.save(output_path)
     summary = (
-        f"Saved to `{output_path}`\n\n"
-        f"Rendered `{len(rendered)}` panels on `{device}` with `{_dtype_label(dtype)}`."
+        f"Saved to {output_path}. Device: {config.device}. "
+        f"Precision: {_dtype_label(config.dtype)}. Scheduler: {config.scheduler}. {detail}."
     )
-    return sheet, summary
+    return image, summary
 
 
-def build_demo() -> gr.Blocks:
-    example_source = Path.cwd() / "output" / "lighthouse-cli-mps-fp32.png"
-    example_source_value = str(example_source) if example_source.exists() else None
+def _bounded_int(payload: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+    value = int(payload.get(key, default))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be between {minimum} and {maximum}")
+    return value
 
-    with gr.Blocks(title="Sandbox Diffusers", theme=gr.themes.Soft(), css=APP_CSS) as demo:
-        with gr.Column(elem_classes=["app-shell"]):
-            gr.Markdown(
-                """
-                <div class="hero">
-                  <h1>Sandbox Diffusers</h1>
-                  <p>
-                    Stable Diffusion v1.5 on Apple Silicon, tuned for this M1. Use the tabs below
-                    to learn prompt changes, scheduler differences, seed drift, and image-to-image edits.
-                  </p>
-                </div>
-                """
-            )
-            gr.Markdown(
-                """
-                <div class="panel-note">
-                  Default path: <code>mps</code> + <code>float32</code> + attention slicing.
-                  Keep the safety checker enabled for public apps; disable it here only for local experiments.
-                </div>
-                """
-            )
 
-            with gr.Tab("Text To Image"):
-                with gr.Row():
-                    with gr.Column(scale=4):
-                        txt_prompt = gr.Textbox(
-                            label="Prompt",
-                            lines=3,
-                            value=DEFAULT_PROMPT,
-                        )
-                        txt_negative = gr.Textbox(
-                            label="Negative Prompt",
-                            lines=2,
-                            value=DEFAULT_NEGATIVE_PROMPT,
-                        )
-                        with gr.Row():
-                            txt_steps = gr.Slider(1, 30, value=12, step=1, label="Steps")
-                            txt_guidance = gr.Slider(
-                                0, 15, value=7.5, step=0.5, label="Guidance Scale"
-                            )
-                            txt_seed = gr.Number(value=42, precision=0, label="Seed")
-                        with gr.Row():
-                            txt_width = gr.Dropdown(
-                                choices=[256, 384, 512, 640],
-                                value=512,
-                                label="Width",
-                            )
-                            txt_height = gr.Dropdown(
-                                choices=[256, 384, 512, 640],
-                                value=512,
-                                label="Height",
-                            )
-                            txt_scheduler = gr.Dropdown(
-                                choices=["default", "ddim", "dpm", "euler", "lms"],
-                                value="default",
-                                label="Scheduler",
-                            )
-                        with gr.Row():
-                            txt_precision = gr.Dropdown(
-                                choices=["auto", "float32", "float16"],
-                                value="auto",
-                                label="Precision",
-                            )
-                            txt_device = gr.Dropdown(
-                                choices=["auto", "mps", "cpu"],
-                                value="auto",
-                                label="Device",
-                            )
-                            txt_safety = gr.Checkbox(
-                                value=True,
-                                label="Disable Safety Checker",
-                            )
-                        txt_run = gr.Button("Generate", variant="primary")
-                    with gr.Column(scale=5):
-                        txt_image = gr.Image(label="Output", type="pil")
-                        txt_summary = gr.Markdown()
+def _bounded_float(
+    payload: dict, key: str, default: float, minimum: float, maximum: float
+) -> float:
+    value = float(payload.get(key, default))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be between {minimum} and {maximum}")
+    return value
 
-                txt_run.click(
-                    fn=_txt2img,
-                    inputs=[
-                        txt_prompt,
-                        txt_negative,
-                        txt_steps,
-                        txt_guidance,
-                        txt_seed,
-                        txt_width,
-                        txt_height,
-                        txt_scheduler,
-                        txt_precision,
-                        txt_device,
-                        txt_safety,
-                    ],
-                    outputs=[txt_image, txt_summary],
+
+def _choice(payload: dict, key: str, default: str, choices: set[str]) -> str:
+    value = str(payload.get(key, default))
+    if value not in choices:
+        raise ValueError(f"invalid {key}")
+    return value
+
+
+def _text(payload: dict, key: str, default: str, maximum: int) -> str:
+    value = str(payload.get(key, default)).strip()
+    if not value or len(value) > maximum:
+        raise ValueError(f"{key} must contain between 1 and {maximum} characters")
+    return value
+
+
+def _integer_list(value, *, maximum: int) -> list[int]:
+    values = [int(item.strip()) for item in str(value).split(",") if item.strip()]
+    if not values:
+        return [42, 123]
+    if len(values) > maximum or any(item < 0 or item > 2**32 - 1 for item in values):
+        raise ValueError("invalid seed list")
+    return values
+
+
+def _decode_image(value) -> Image.Image:
+    if not isinstance(value, str) or not value.startswith("data:image/"):
+        raise ValueError("Upload a source image first")
+    try:
+        encoded = value.split(",", 1)[1]
+        raw = base64.b64decode(encoded, validate=True)
+    except (IndexError, binascii.Error) as error:
+        raise ValueError("invalid source image") from error
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("source image is too large")
+    image = Image.open(BytesIO(raw))
+    if image.width * image.height > MAX_IMAGE_PIXELS:
+        raise ValueError("source image has too many pixels")
+    image.load()
+    return image.convert("RGB")
+
+
+def _image_data_url(image: Image.Image) -> str:
+    output = BytesIO()
+    image.save(output, format="PNG")
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+async def homepage(request: Request) -> HTMLResponse:
+    return HTMLResponse(APP_HTML)
+
+
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "model": DEFAULT_MODEL, "remote_code": False})
+
+
+async def generate(request: Request) -> JSONResponse:
+    return await _run_request(request, _txt2img)
+
+
+async def transform(request: Request) -> JSONResponse:
+    return await _run_request(request, _img2img)
+
+
+async def compare(request: Request) -> JSONResponse:
+    return await _run_request(request, _compare)
+
+
+async def _run_request(request: Request, operation) -> JSONResponse:
+    length = int(request.headers.get("content-length", "0") or 0)
+    if length > MAX_REQUEST_BYTES:
+        return JSONResponse({"error": "request is too large"}, status_code=413)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise TypeError("request body must be a JSON object")
+        image, summary = await run_in_threadpool(operation, payload)
+        return JSONResponse({"image": _image_data_url(image), "summary": summary})
+    except (ValueError, TypeError) as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.extend(
+                    [
+                        (b"content-security-policy", b"default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'"),
+                        (b"referrer-policy", b"no-referrer"),
+                        (b"x-content-type-options", b"nosniff"),
+                        (b"x-frame-options", b"DENY"),
+                    ]
                 )
+                message["headers"] = headers
+            await send(message)
 
-            with gr.Tab("Image To Image"):
-                with gr.Row():
-                    with gr.Column(scale=4):
-                        img_source = gr.Image(
-                            label="Source Image",
-                            type="pil",
-                            value=example_source_value,
-                        )
-                        img_prompt = gr.Textbox(
-                            label="Prompt",
-                            lines=3,
-                            value="watercolor painting of the same lighthouse scene, soft brush strokes",
-                        )
-                        img_negative = gr.Textbox(
-                            label="Negative Prompt",
-                            lines=2,
-                            value=DEFAULT_NEGATIVE_PROMPT,
-                        )
-                        with gr.Row():
-                            img_strength = gr.Slider(
-                                0.1, 0.9, value=0.45, step=0.05, label="Strength"
-                            )
-                            img_steps = gr.Slider(1, 30, value=18, step=1, label="Steps")
-                            img_guidance = gr.Slider(
-                                0, 15, value=7.5, step=0.5, label="Guidance Scale"
-                            )
-                        with gr.Row():
-                            img_seed = gr.Number(value=42, precision=0, label="Seed")
-                            img_width = gr.Dropdown(
-                                choices=[256, 384, 512, 640],
-                                value=512,
-                                label="Width",
-                            )
-                            img_height = gr.Dropdown(
-                                choices=[256, 384, 512, 640],
-                                value=512,
-                                label="Height",
-                            )
-                        with gr.Row():
-                            img_scheduler = gr.Dropdown(
-                                choices=["default", "ddim", "dpm", "euler", "lms"],
-                                value="default",
-                                label="Scheduler",
-                            )
-                            img_precision = gr.Dropdown(
-                                choices=["auto", "float32", "float16"],
-                                value="auto",
-                                label="Precision",
-                            )
-                            img_device = gr.Dropdown(
-                                choices=["auto", "mps", "cpu"],
-                                value="auto",
-                                label="Device",
-                            )
-                            img_safety = gr.Checkbox(
-                                value=True,
-                                label="Disable Safety Checker",
-                            )
-                        img_run = gr.Button("Transform", variant="primary")
-                    with gr.Column(scale=5):
-                        img_output = gr.Image(label="Output", type="pil")
-                        img_summary = gr.Markdown()
+        await self.app(scope, receive, send_with_headers)
 
-                img_run.click(
-                    fn=_img2img,
-                    inputs=[
-                        img_source,
-                        img_prompt,
-                        img_negative,
-                        img_strength,
-                        img_steps,
-                        img_guidance,
-                        img_seed,
-                        img_width,
-                        img_height,
-                        img_scheduler,
-                        img_precision,
-                        img_device,
-                        img_safety,
-                    ],
-                    outputs=[img_output, img_summary],
-                )
 
-            with gr.Tab("Compare"):
-                with gr.Row():
-                    with gr.Column(scale=4):
-                        compare_prompts = gr.Textbox(
-                            label="Prompts",
-                            lines=5,
-                            value=DEFAULT_PROMPT + "\nwatercolor painting of a red lighthouse on a rocky coast at sunrise",
-                            info="Use multiple lines to compare prompts. If you enter one prompt, the app compares seeds or schedulers instead.",
-                        )
-                        compare_seeds = gr.Textbox(
-                            label="Seeds",
-                            value="42,123",
-                            info="Comma-separated integers.",
-                        )
-                        compare_schedulers = gr.CheckboxGroup(
-                            choices=["default", "ddim", "dpm", "euler", "lms"],
-                            value=["default", "euler"],
-                            label="Schedulers",
-                        )
-                        compare_negative = gr.Textbox(
-                            label="Negative Prompt",
-                            lines=2,
-                            value=DEFAULT_NEGATIVE_PROMPT,
-                        )
-                        with gr.Row():
-                            compare_steps = gr.Slider(1, 30, value=12, step=1, label="Steps")
-                            compare_guidance = gr.Slider(
-                                0, 15, value=7.5, step=0.5, label="Guidance Scale"
-                            )
-                        with gr.Row():
-                            compare_width = gr.Dropdown(
-                                choices=[256, 384, 512],
-                                value=256,
-                                label="Width",
-                            )
-                            compare_height = gr.Dropdown(
-                                choices=[256, 384, 512],
-                                value=256,
-                                label="Height",
-                            )
-                            compare_precision = gr.Dropdown(
-                                choices=["auto", "float32", "float16"],
-                                value="auto",
-                                label="Precision",
-                            )
-                        with gr.Row():
-                            compare_device = gr.Dropdown(
-                                choices=["auto", "mps", "cpu"],
-                                value="auto",
-                                label="Device",
-                            )
-                            compare_safety = gr.Checkbox(
-                                value=True,
-                                label="Disable Safety Checker",
-                            )
-                        compare_run = gr.Button("Build Contact Sheet", variant="primary")
-                    with gr.Column(scale=5):
-                        compare_image = gr.Image(label="Contact Sheet", type="pil")
-                        compare_summary = gr.Markdown()
+def build_app() -> Starlette:
+    app = Starlette(
+        debug=False,
+        routes=[
+            Route("/", homepage),
+            Route("/healthz", health),
+            Route("/api/txt2img", generate, methods=["POST"]),
+            Route("/api/img2img", transform, methods=["POST"]),
+            Route("/api/compare", compare, methods=["POST"]),
+        ],
+    )
+    app.add_middleware(SecurityHeadersMiddleware)
+    return app
 
-                compare_run.click(
-                    fn=_compare,
-                    inputs=[
-                        compare_prompts,
-                        compare_seeds,
-                        compare_schedulers,
-                        compare_negative,
-                        compare_steps,
-                        compare_guidance,
-                        compare_width,
-                        compare_height,
-                        compare_precision,
-                        compare_device,
-                        compare_safety,
-                    ],
-                    outputs=[compare_image, compare_summary],
-                )
 
-    return demo
+APP_HTML = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sandbox Diffusers</title><style>
+:root{{--sand:#f3efe4;--panel:#fffaf0;--ink:#211b17;--accent:#b54f28;--blue:#235f72}}
+*{{box-sizing:border-box}} body{{margin:0;background:radial-gradient(circle at top right,#efd6c5,transparent 32%),var(--sand);color:var(--ink);font:16px system-ui,sans-serif}}
+main{{max-width:1100px;margin:auto;padding:34px 22px}} .hero,.panel{{background:#fff9;border:1px solid #d5cab8;border-radius:22px;padding:24px;box-shadow:0 12px 32px #34200d12}}
+h1{{margin:0;font-size:2.5rem}} .note{{border-left:4px solid var(--accent);padding:10px 14px;margin:18px 0;background:#fff8}}
+.tabs{{display:flex;gap:8px;margin:22px 0 12px}} button{{border:0;border-radius:12px;padding:11px 16px;background:var(--blue);color:white;font-weight:700;cursor:pointer}}
+.tabs button{{background:#d8d0c2;color:var(--ink)}} .tabs button.active{{background:var(--accent);color:white}}
+.tab{{display:none}} .tab.active{{display:grid;grid-template-columns:1fr 1fr;gap:22px}} label{{display:block;font-weight:650;margin:12px 0 5px}}
+textarea,input,select{{width:100%;padding:10px;border:1px solid #bcb09e;border-radius:10px;background:white}} textarea{{min-height:86px;resize:vertical}}
+.row{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}} .output{{min-height:360px;border:1px dashed #bcb09e;border-radius:16px;display:grid;place-items:center;padding:14px;background:#fff}}
+.output img{{max-width:100%;border-radius:10px}} .status{{white-space:pre-wrap;color:#544a42}} @media(max-width:760px){{.tab.active{{grid-template-columns:1fr}}.row{{grid-template-columns:1fr}}}}
+</style></head><body><main>
+<section class="hero"><h1>Sandbox Diffusers</h1><p>Stable Diffusion v1.5 on Apple Silicon, with explicit remote-code rejection and a local-only web server.</p></section>
+<p class="note">Custom Hub code is always disabled. The safety checker remains enabled unless you deliberately opt out for a local experiment.</p>
+<nav class="tabs"><button class="active" data-tab="txt">Text to image</button><button data-tab="img">Image to image</button><button data-tab="cmp">Compare</button></nav>
+<section class="panel tab active" id="txt"><div><label>Prompt</label><textarea name="prompt">{DEFAULT_PROMPT}</textarea><label>Negative prompt</label><textarea name="negative_prompt">{DEFAULT_NEGATIVE_PROMPT}</textarea><div class="row"><label>Steps<input name="steps" type="number" min="1" max="30" value="12"></label><label>Seed<input name="seed" type="number" min="0" value="42"></label><label>Scheduler<select name="scheduler"><option>default</option><option>ddim</option><option>dpm</option><option>euler</option><option>lms</option></select></label></div><label><input name="disable_safety_checker" type="checkbox"> Disable safety checker</label><button data-run="txt2img">Generate</button></div><div class="output"><p class="status">Ready.</p></div></section>
+<section class="panel tab" id="img"><div><label>Source image</label><input name="source" type="file" accept="image/png,image/jpeg,image/webp"><label>Prompt</label><textarea name="prompt">watercolor painting of the same lighthouse scene, soft brush strokes</textarea><div class="row"><label>Strength<input name="strength" type="number" min="0.1" max="0.9" step="0.05" value="0.45"></label><label>Steps<input name="steps" type="number" min="1" max="30" value="18"></label><label>Seed<input name="seed" type="number" min="0" value="42"></label></div><button data-run="img2img">Transform</button></div><div class="output"><p class="status">Upload an image to begin.</p></div></section>
+<section class="panel tab" id="cmp"><div><label>Prompts, one per line</label><textarea name="prompts">{DEFAULT_PROMPT}\nwatercolor painting of a red lighthouse on a rocky coast at sunrise</textarea><label>Seeds, comma separated</label><input name="seeds" value="42,123"><label>Schedulers, comma separated</label><input name="schedulers" value="default,euler"><button data-run="compare">Build contact sheet</button></div><div class="output"><p class="status">Ready.</p></div></section>
+</main><script>
+const tabs=document.querySelectorAll('[data-tab]');tabs.forEach(b=>b.onclick=()=>{{tabs.forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById(b.dataset.tab).classList.add('active')}});
+const value=(root,name)=>root.querySelector(`[name="${{name}}"]`)?.value;const number=(root,name)=>Number(value(root,name));
+for(const button of document.querySelectorAll('[data-run]')) button.onclick=async()=>{{const root=button.closest('.tab'),status=root.querySelector('.status'),output=root.querySelector('.output');button.disabled=true;status.textContent='Working locally…';let payload={{prompt:value(root,'prompt'),steps:number(root,'steps')||12,seed:number(root,'seed')||42}};if(button.dataset.run==='txt2img'){{payload.negative_prompt=value(root,'negative_prompt');payload.scheduler=value(root,'scheduler');payload.disable_safety_checker=root.querySelector('[name="disable_safety_checker"]').checked}}if(button.dataset.run==='img2img'){{payload.strength=number(root,'strength');const file=root.querySelector('[name="source"]').files[0];if(!file){{status.textContent='Choose a source image first.';button.disabled=false;return}}payload.source_image=await new Promise((ok,no)=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result);reader.onerror=no;reader.readAsDataURL(file)}})}}if(button.dataset.run==='compare'){{payload.prompts=value(root,'prompts');payload.seeds=value(root,'seeds');payload.schedulers=value(root,'schedulers').split(',').map(x=>x.trim())}}try{{const response=await fetch(`/api/${{button.dataset.run}}`,{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(payload)}});const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');output.innerHTML='';const image=new Image();image.src=data.image;image.alt='Generated output';const summary=document.createElement('p');summary.className='status';summary.textContent=data.summary;output.append(image,summary)}}catch(error){{status.textContent=error.message}}finally{{button.disabled=false}}}};
+</script></body></html>"""
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Launch the Gradio UI.")
+    parser = argparse.ArgumentParser(description="Launch the local Sandbox Diffusers UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Server host.")
     parser.add_argument("--port", type=int, default=7860, help="Server port.")
-    parser.add_argument("--share", action="store_true", help="Create a public Gradio share link.")
     return parser
 
 
 def main() -> None:
+    import uvicorn
+
     args = build_parser().parse_args()
-    demo = build_demo()
-    demo.launch(server_name=args.host, server_port=args.port, share=args.share, show_error=True)
+    uvicorn.run(build_app(), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

@@ -12,3 +12,6 @@ src/sandbox_diffusers.egg-info/dependency_links.txt
 src/sandbox_diffusers.egg-info/entry_points.txt
 src/sandbox_diffusers.egg-info/requires.txt
 src/sandbox_diffusers.egg-info/top_level.txt
+tests/test_app.py
+tests/test_runtime.py
+tests/test_security.py

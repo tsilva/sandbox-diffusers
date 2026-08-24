@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate>=1.10.0",
-  "diffusers[torch]==0.38.0",
+  "diffusers[torch]==0.39.0",
   "huggingface-hub>=1,<2",
   "Pillow>=12.3.0",
   "safetensors>=0.6.2",

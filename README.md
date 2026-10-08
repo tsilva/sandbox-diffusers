@@ -6,8 +6,8 @@
 
 Minimal project scaffold for running the latest stable `diffusers` release on Apple Silicon.
 
-As of August 14, 2026, this project pins `diffusers==0.38.0`. This release closes the
-remote-code trust bypasses fixed in 0.38.0, and the application explicitly keeps
+As of October 8, 2026, this project pins `diffusers==0.40.0`. This retains the
+remote-code trust bypass fixes introduced in 0.38.0, and the application explicitly keeps
 `trust_remote_code=False` for all model loads:
 
 - PyPI: <https://pypi.org/project/diffusers/>

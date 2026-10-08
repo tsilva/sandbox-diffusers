@@ -28,9 +28,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          cache: true
+          enable-cache: true
       - name: Install the locked dependency graph
         run: uv sync --config-file uv.toml --frozen --all-groups
       - name: Validate the lockfile
@@ -43,7 +43,7 @@ jobs:
         run: uv run --frozen pip-audit
       - name: Import and CLI smoke tests
         run: |
-          uv run --frozen python -c "import diffusers, sandbox_diffusers; assert diffusers.__version__ == '0.38.0'"
+          uv run --frozen python -c "import diffusers, sandbox_diffusers; assert diffusers.__version__ == '0.40.0'"
           uv run --frozen sandbox-diffusers-generate --help >/dev/null
           uv run --frozen sandbox-diffusers-img2img --help >/dev/null
           uv run --frozen sandbox-diffusers-compare --help >/dev/null

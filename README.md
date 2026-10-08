@@ -1,4 +1,8 @@
-# sandbox-diffusers
+<p align="center">
+  <!-- repo-tagline:start -->
+  <strong>🎨 Run diffusion pipelines locally on Apple Silicon 🧪</strong>
+  <!-- repo-tagline:end -->
+</p>
 
 Minimal project scaffold for running the latest stable `diffusers` release on Apple Silicon.
 

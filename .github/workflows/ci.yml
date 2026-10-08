@@ -43,7 +43,7 @@ jobs:
         run: uv run --frozen pip-audit
       - name: Import and CLI smoke tests
         run: |
-          uv run --frozen python -c "import diffusers, sandbox_diffusers; assert diffusers.__version__ == '0.38.0'"
+          uv run --frozen python -c "import diffusers, sandbox_diffusers; assert diffusers.__version__ == '0.40.0'"
           uv run --frozen sandbox-diffusers-generate --help >/dev/null
           uv run --frozen sandbox-diffusers-img2img --help >/dev/null
           uv run --frozen sandbox-diffusers-compare --help >/dev/null

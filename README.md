@@ -19,6 +19,10 @@ remote-code trust bypass fixes introduced in 0.38.0, and the application explici
 
 ## Why the default changed to Stable Diffusion v1.5
 
+Dependency resolution keeps the seven-day release-age setting in `uv.toml` and
+the security constraints in `[tool.uv]` in `pyproject.toml`. Keep both files with
+the committed `uv.lock` when updating dependencies.
+
 After testing on this MacBook Pro M1, `sdxl-turbo` on `mps` produced black outputs. I checked current upstream guidance and changed the default example to `stable-diffusion-v1-5/stable-diffusion-v1-5` because:
 
 - Hugging Face's current MPS page still demonstrates `stable-diffusion-v1-5/stable-diffusion-v1-5`

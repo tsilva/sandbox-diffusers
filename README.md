@@ -197,3 +197,7 @@ Useful flags:
 - On this M1, `float16` on MPS produced black images for both SDXL Turbo and Stable Diffusion v1.5, while `float32` on MPS produced a valid image.
 - If you want the most conservative memory profile, keep resolution at `512x512`.
 - The quickest way to learn is to hold everything constant except one parameter: prompt, seed, scheduler, or img2img strength.
+
+## License
+
+[MIT License](LICENSE).

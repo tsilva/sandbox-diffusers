@@ -6,7 +6,7 @@
 
 Minimal project scaffold for running the latest stable `diffusers` release on Apple Silicon.
 
-As of October 8, 2026, this project pins `diffusers==0.40.0`. This retains the
+The project pins `diffusers==0.42.0`. This retains the
 remote-code trust bypass fixes introduced in 0.38.0, and the application explicitly keeps
 `trust_remote_code=False` for all model loads:
 
